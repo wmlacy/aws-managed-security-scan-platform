@@ -1,0 +1,168 @@
+# ============================================================================
+#  buildspec.yml  —  Managed Security Scan Platform
+#  Lives at the ROOT of YOUR pipeline repo (never the client's codebase).
+#  CodeBuild uses this file as its source; the client target is pulled in
+#  during pre_build as DATA, so your scan logic stays out of their repo.
+#
+#  Phases map 1:1 to the architecture:
+#    install     -> set up scanners
+#    pre_build   -> pull secrets + fetch the client target
+#    build       -> run scans (repo | web | api)
+#    post_build  -> write reports to S3, THEN publish SNS (only if upload ok)
+# ============================================================================
+
+version: 0.2
+
+env:
+  variables:
+    # ---- Set sensible defaults here; OVERRIDE per run from EventBridge /
+    #      CodePipeline (environmentVariablesOverride) so one project scans
+    #      any client. ----
+    TARGET_TYPE: "repo"          # repo | web | api
+    TARGET_REPO: ""              # e.g. "acme-corp/storefront"  (for repo)
+    TARGET_URL: ""               # e.g. "https://staging.acme.com" (web/api)
+    OPENAPI_SPEC: ""             # URL or path to OpenAPI spec   (api only)
+    CLIENT_NAME: "unknown-client"
+    REPORT_BUCKET: ""            # your S3 bucket name (no s3:// prefix)
+    SNS_TOPIC_ARN: ""            # arn:aws:sns:region:acct:scan-notifications
+
+  secrets-manager:
+    # Format:  ENV_VAR: "secret-id:json-key"   (omit :json-key for plaintext)
+    GITHUB_TOKEN: "security-scan/github-token"
+    # Auth header for web/api scans. Secret MUST exist (value 'none' = no header).
+    TARGET_AUTH_HEADER: "security-scan/target-auth-header"
+
+  exported-variables:
+    - SCAN_ID
+
+phases:
+
+  install:
+    runtime-versions:
+      python: 3.12
+    commands:
+      - echo "[install] provisioning scanners..."
+      # SAST + SCA + secrets scanning for repos
+      - pip install --quiet semgrep==1.164.0
+      - curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.70.0
+      # NOTE: x64 binary -> pinned to x86_64 compute. On ARM/Graviton, switch to the linux_arm64 asset.
+      - curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz | tar -xz -C /usr/local/bin gitleaks
+      - semgrep --version && trivy --version && gitleaks version
+      # NOTE: web/api scans use the OWASP ZAP docker image (pulled in build).
+      #       That requires this CodeBuild project to run in PRIVILEGED mode
+      #       with the Docker daemon enabled. Repo scans do NOT need Docker.
+
+  pre_build:
+    commands:
+      - echo "[pre_build] preparing scan context..."
+      # --- Fail fast: assert required vars BEFORE doing any work. ---
+      # The ': "${VAR:?msg}"' idiom is a no-op that exits non-zero with a
+      # clear log line if VAR is unset or empty -> CodeBuild fails the phase.
+      - ': "${REPORT_BUCKET:?REPORT_BUCKET must be set}"'
+      - ': "${SNS_TOPIC_ARN:?SNS_TOPIC_ARN must be set}"'
+      - ': "${CLIENT_NAME:?CLIENT_NAME must be set}"'
+      # Target requirement depends on the scan type.
+      - |
+        case "${TARGET_TYPE}" in
+          repo) : "${TARGET_REPO:?TARGET_REPO required when TARGET_TYPE=repo}" ;;
+          web)  : "${TARGET_URL:?TARGET_URL required when TARGET_TYPE=web}" ;;
+          api)  : "${OPENAPI_SPEC:?OPENAPI_SPEC required when TARGET_TYPE=api}" ;;
+          *)    echo "TARGET_TYPE must be repo|web|api (got '${TARGET_TYPE}')"; exit 1 ;;
+        esac
+      - export SCAN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$(cut -c1-8 /proc/sys/kernel/random/uuid)"
+      - export REPORT_DIR="reports/${SCAN_ID}"
+      # Human-readable target string for the summary + SNS message (first set wins).
+      - export TARGET_DESC="${TARGET_REPO:-${TARGET_URL:-${OPENAPI_SPEC}}}"
+      - mkdir -p "${REPORT_DIR}"
+      - echo "Scan ${SCAN_ID} | type=${TARGET_TYPE} | client=${CLIENT_NAME} | target=${TARGET_DESC}"
+      # Fetch the client target as DATA (not as the CodeBuild source).
+      - |
+        if [ "${TARGET_TYPE}" = "repo" ]; then
+          echo "[pre_build] cloning ${TARGET_REPO}..."
+          git clone --depth 1 "https://x-access-token:${GITHUB_TOKEN}@github.com/${TARGET_REPO}.git" target-src
+          # Scrub the token from .git/config so it can't leak into trivy/scan output.
+          git -C target-src remote set-url origin "https://github.com/${TARGET_REPO}.git"
+        else
+          echo "[pre_build] target is a live endpoint: ${TARGET_URL}"
+        fi
+
+  build:
+    commands:
+      - echo "[build] running scans for type=${TARGET_TYPE}..."
+      # Scanners exit non-zero when they find issues. We capture that into
+      # SCAN_RC instead of failing the build, so post_build always uploads
+      # the report and the SNS notification reflects the true result.
+      - SCAN_RC=0
+      - |
+        # Optional ZAP auth header. The secret must hold a value (Secrets
+        # Manager rejects empty), so 'none' AND empty both mean "no header".
+        ZAP_AUTH=()
+        if [ -n "${TARGET_AUTH_HEADER}" ] && [ "${TARGET_AUTH_HEADER}" != "none" ]; then
+          ZAP_AUTH=(-z "header=${TARGET_AUTH_HEADER}")
+        fi
+        case "${TARGET_TYPE}" in
+          repo)
+            semgrep scan --error --metrics off --config p/default --json --output "${REPORT_DIR}/semgrep.json" target-src || SCAN_RC=$?
+            trivy fs --exit-code 1 --scanners vuln,secret,misconfig --format json --output "${REPORT_DIR}/trivy.json" target-src || SCAN_RC=$?
+            gitleaks detect --source target-src --report-format json --report-path "${REPORT_DIR}/gitleaks.json" || SCAN_RC=$?
+            ;;
+          web)
+            docker run --rm -v "$(pwd)/${REPORT_DIR}:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable \
+              zap-baseline.py -t "${TARGET_URL}" -J zap.json -r zap.html \
+              "${ZAP_AUTH[@]}" || SCAN_RC=$?
+            ;;
+          api)
+            docker run --rm -v "$(pwd)/${REPORT_DIR}:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable \
+              zap-api-scan.py -t "${OPENAPI_SPEC}" -f openapi -J zap.json -r zap.html \
+              "${ZAP_AUTH[@]}" || SCAN_RC=$?
+            ;;
+          *)
+            echo "Unknown TARGET_TYPE: ${TARGET_TYPE}"; exit 1 ;;
+        esac
+      - export SCAN_RC
+      - echo "Scan finished with rc=${SCAN_RC}" | tee "${REPORT_DIR}/scan_status.txt"
+
+  post_build:
+    commands:
+      - echo "[post_build] consolidating, uploading, notifying..."
+      # 1) Write a small machine-readable summary alongside the raw reports
+      - |
+        cat > "${REPORT_DIR}/summary.json" <<EOF
+        {
+          "scan_id": "${SCAN_ID}",
+          "client": "${CLIENT_NAME}",
+          "target_type": "${TARGET_TYPE}",
+          "target": "${TARGET_DESC}",
+          "scan_rc": "${SCAN_RC:-unknown}",
+          "timestamp_utc": "$(date -u +%FT%TZ)"
+        }
+        EOF
+      # 2) Push everything to S3 FIRST. If this fails, we never reach SNS,
+      #    so a "scan complete" alert can't fire on a missing report.
+      - aws s3 cp "${REPORT_DIR}" "s3://${REPORT_BUCKET}/${CLIENT_NAME}/${SCAN_ID}/" --recursive
+      # 3) Publish the completion event to SNS (the diagram's CodeBuild -> SNS)
+      - |
+        if [ "${SCAN_RC:-1}" -eq 0 ]; then
+          RESULT="completed cleanly - no blocking findings"
+        else
+          RESULT="completed WITH findings (rc=${SCAN_RC})"
+        fi
+        # SNS Subject must be ASCII and < 100 chars; truncate as a safeguard.
+        SUBJECT="$(printf '%.99s' "Scan ${CLIENT_NAME}: ${RESULT}")"
+      - |
+        aws sns publish \
+          --topic-arn "${SNS_TOPIC_ARN}" \
+          --subject "${SUBJECT}" \
+          --message "Client:      ${CLIENT_NAME}
+        Scan ID:     ${SCAN_ID}
+        Target type: ${TARGET_TYPE}
+        Target:      ${TARGET_DESC}
+        Result:      ${RESULT}
+        Reports:     s3://${REPORT_BUCKET}/${CLIENT_NAME}/${SCAN_ID}/"
+
+# Hand the reports back to CodePipeline as a build artifact (backup to S3).
+artifacts:
+  files:
+    - "**/*"
+  base-directory: reports
+  name: scan-reports

@@ -1,0 +1,6 @@
+# macOS
+.DS_Store
+
+# Local working files (not part of the platform)
+*.png
+PROJECT_FILES.pdf
