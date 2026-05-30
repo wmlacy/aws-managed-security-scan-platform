@@ -14,6 +14,8 @@
 version: 0.2
 
 env:
+  # Force bash so array syntax (ZAP_AUTH=()) works. CodeBuild defaults to /bin/sh.
+  shell: bash
   variables:
     # ---- Set sensible defaults here; OVERRIDE per run from EventBridge /
     #      CodePipeline (environmentVariablesOverride) so one project scans
