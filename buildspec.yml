@@ -87,42 +87,18 @@ phases:
         else
           echo "[pre_build] target is a live endpoint: ${TARGET_URL}"
         fi
+      # Ensure scan.sh is executable (web upload of the repo can drop the +x bit).
+      - chmod +x scan.sh
 
   build:
     commands:
       - echo "[build] running scans for type=${TARGET_TYPE}..."
-      # Scanners exit non-zero when they find issues. We capture that into
-      # SCAN_RC instead of failing the build, so post_build always uploads
-      # the report and the SNS notification reflects the true result.
+      # scan.sh runs the scanners and writes scan_status.txt. Its exit code
+      # is captured (not propagated) so post_build always uploads reports
+      # and the SNS notification reflects the true result.
       - SCAN_RC=0
-      - |
-        # Optional ZAP auth header. The secret must hold a value (Secrets
-        # Manager rejects empty), so 'none' AND empty both mean "no header".
-        ZAP_AUTH=()
-        if [ -n "${TARGET_AUTH_HEADER}" ] && [ "${TARGET_AUTH_HEADER}" != "none" ]; then
-          ZAP_AUTH=(-z "header=${TARGET_AUTH_HEADER}")
-        fi
-        case "${TARGET_TYPE}" in
-          repo)
-            semgrep scan --error --metrics off --config p/default --json --output "${REPORT_DIR}/semgrep.json" target-src || SCAN_RC=$?
-            trivy fs --exit-code 1 --scanners vuln,secret,misconfig --format json --output "${REPORT_DIR}/trivy.json" target-src || SCAN_RC=$?
-            gitleaks detect --source target-src --report-format json --report-path "${REPORT_DIR}/gitleaks.json" || SCAN_RC=$?
-            ;;
-          web)
-            docker run --rm -v "$(pwd)/${REPORT_DIR}:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable \
-              zap-baseline.py -t "${TARGET_URL}" -J zap.json -r zap.html \
-              "${ZAP_AUTH[@]}" || SCAN_RC=$?
-            ;;
-          api)
-            docker run --rm -v "$(pwd)/${REPORT_DIR}:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable \
-              zap-api-scan.py -t "${OPENAPI_SPEC}" -f openapi -J zap.json -r zap.html \
-              "${ZAP_AUTH[@]}" || SCAN_RC=$?
-            ;;
-          *)
-            echo "Unknown TARGET_TYPE: ${TARGET_TYPE}"; exit 1 ;;
-        esac
+      - ./scan.sh || SCAN_RC=$?
       - export SCAN_RC
-      - echo "Scan finished with rc=${SCAN_RC}" | tee "${REPORT_DIR}/scan_status.txt"
 
   post_build:
     commands:
