@@ -18,7 +18,7 @@ A productized AWS-based security scanning service. A single CodeBuild project ta
 ## Current status
 
 - **Pipeline is live and works end-to-end on a fully Terraform-managed stack.** All AWS resources (S3, SNS, secrets, IAM role + policy, CodeBuild project) were torn down and recreated from `terraform/{main,variables,outputs}.tf`. End-to-end verified 2026-06-06: a self-test scan against the pipeline repo itself completed all phases, dropped 5 report files in S3, and fired the SNS email.
-- **Files built: 6 of 8** from the manifest, plus the IAM policy.
+- **Files built: 7 of 8** from the manifest, plus the IAM policy.
 - **Source credentials in place** as PAT (re-imported after destroy — the pre-existing OAuth credential didn't auto-pickup on the new TF-built project).
 - Secrets contain real values (set post-apply via `put-secret-value`). Both secrets have `lifecycle.ignore_changes = [secret_string]` in Terraform so future applies don't reset them.
 
@@ -57,7 +57,7 @@ All in **region `us-east-1`**, account **`779846785166`**. All managed by Terraf
 | `README.md` | To do | not started |
 | `buildspec.yml` | **Built** | hardened; calls `./scan.sh`; uses `env.shell: bash` |
 | `scan.sh` | **Built** | scanner case + ZAP_AUTH array + writes `scan_status.txt`; exits with SCAN_RC |
-| `report_summary.py` | To do | next priority |
+| `report_summary.py` | **Built** | parses semgrep/trivy/gitleaks/zap output into structured `summary.json` + human-readable `summary.txt`; SNS body now reads `summary.txt` via `file://` |
 | `tools/zap-baseline.conf` | To do | only matters once web/api scans run |
 | `terraform/main.tf` | **Built** | 11 resources + 3 data blocks; proven by end-to-end run |
 | `terraform/variables.tf` | **Built** | 11 inputs with defaults matching live account |
@@ -153,9 +153,9 @@ aws codebuild batch-get-builds --ids <build-id> --region us-east-1 --query 'buil
 
 In order of priority:
 
-1. **`report_summary.py`** — parses `semgrep.json` / `trivy.json` / `gitleaks.json` into a readable summary; would enrich what's in the SNS email and serve as the human-facing artifact.
-2. **`tools/zap-baseline.conf`** — ZAP tuning for web/api scans. Only matters once web/api scans are run in earnest.
-3. **`README.md`** — project documentation.
+1. **`tools/zap-baseline.conf`** — ZAP tuning for web/api scans. Only matters once web/api scans are run in earnest.
+2. **`README.md`** — project documentation.
+3. **(Optional hardening)** Move the TF stack to KMS CMKs for S3, SNS, and Secrets Manager. The self-scan flagged these as HIGH/MEDIUM — the current "plain setup" choice (decisions A/D) was deliberate but is the obvious next maturity bump.
 
 ---
 
