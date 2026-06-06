@@ -4,3 +4,11 @@
 # Local working files (not part of the platform)
 *.png
 PROJECT_FILES.pdf
+
+# Terraform
+terraform/.terraform/
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/*.tfvars
+terraform/crash.log
+terraform/crash.*.log
