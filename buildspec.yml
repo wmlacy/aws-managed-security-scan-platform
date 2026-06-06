@@ -102,41 +102,30 @@ phases:
 
   post_build:
     commands:
-      - echo "[post_build] consolidating, uploading, notifying..."
-      # 1) Write a small machine-readable summary alongside the raw reports
-      - |
-        cat > "${REPORT_DIR}/summary.json" <<EOF
-        {
-          "scan_id": "${SCAN_ID}",
-          "client": "${CLIENT_NAME}",
-          "target_type": "${TARGET_TYPE}",
-          "target": "${TARGET_DESC}",
-          "scan_rc": "${SCAN_RC:-unknown}",
-          "timestamp_utc": "$(date -u +%FT%TZ)"
-        }
-        EOF
+      - echo "[post_build] generating summary, uploading, notifying..."
+      # 1) Generate summary.json + summary.txt from the raw scanner output.
+      #    The script is defensive: always writes a minimal summary.txt even
+      #    on internal error, so the SNS publish below never cascade-fails.
+      - python3 report_summary.py
       # 2) Push everything to S3 FIRST. If this fails, we never reach SNS,
       #    so a "scan complete" alert can't fire on a missing report.
       - aws s3 cp "${REPORT_DIR}" "s3://${REPORT_BUCKET}/${CLIENT_NAME}/${SCAN_ID}/" --recursive
-      # 3) Publish the completion event to SNS (the diagram's CodeBuild -> SNS)
+      # 3) Build a short SNS subject (must be ASCII and < 100 chars).
       - |
         if [ "${SCAN_RC:-1}" -eq 0 ]; then
-          RESULT="completed cleanly - no blocking findings"
+          SUBJECT_STATUS="clean"
         else
-          RESULT="completed WITH findings (rc=${SCAN_RC})"
+          SUBJECT_STATUS="findings (rc=${SCAN_RC})"
         fi
-        # SNS Subject must be ASCII and < 100 chars; truncate as a safeguard.
-        SUBJECT="$(printf '%.99s' "Scan ${CLIENT_NAME}: ${RESULT}")"
+        SUBJECT="$(printf '%.99s' "Scan ${CLIENT_NAME}: ${SUBJECT_STATUS}")"
+      # 4) Publish to SNS with summary.txt as the message body. Using file://
+      #    instead of $(cat ...) avoids the shell expanding any $(...) or
+      #    backticks that might appear in a finding's message text.
       - |
         aws sns publish \
           --topic-arn "${SNS_TOPIC_ARN}" \
           --subject "${SUBJECT}" \
-          --message "Client:      ${CLIENT_NAME}
-        Scan ID:     ${SCAN_ID}
-        Target type: ${TARGET_TYPE}
-        Target:      ${TARGET_DESC}
-        Result:      ${RESULT}
-        Reports:     s3://${REPORT_BUCKET}/${CLIENT_NAME}/${SCAN_ID}/"
+          --message "file://${REPORT_DIR}/summary.txt"
 
 # Hand the reports back to CodePipeline as a build artifact (backup to S3).
 artifacts:
