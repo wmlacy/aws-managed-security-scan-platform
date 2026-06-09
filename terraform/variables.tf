@@ -28,9 +28,9 @@ variable "project_name" {
 }
 
 variable "report_bucket_name" {
-  description = "Globally-unique S3 bucket name for scan reports. Lowercase, no underscores, 3-63 chars."
+  description = "Globally-unique S3 bucket name for scan reports. Lowercase, no underscores, 3-63 chars. CHANGE this when forking — bucket names are global to AWS."
   type        = string
-  default     = "managed-security-scan-reports-will-001"
+  default     = "your-scan-reports-bucket-CHANGEME"
 }
 
 variable "sns_topic_name" {
@@ -52,7 +52,7 @@ variable "secrets_prefix" {
 variable "notification_email" {
   description = "Email address subscribed to the SNS topic. You'll need to re-confirm via email after every apply."
   type        = string
-  default     = "wmlacy3000@gmail.com"
+  default     = "you@example.com"
 }
 
 # ---------------------------------------------------------------------------
@@ -60,9 +60,9 @@ variable "notification_email" {
 # ---------------------------------------------------------------------------
 
 variable "github_repo_url" {
-  description = "HTTPS URL of the pipeline repo (the one containing buildspec.yml and scan.sh)."
+  description = "HTTPS URL of the pipeline repo (the one containing buildspec.yml and scan.sh). Point this at your fork so CodeBuild pulls the right code."
   type        = string
-  default     = "https://github.com/wmlacy/aws-managed-security-scan-platform.git"
+  default     = "https://github.com/YOUR-FORK/aws-managed-security-scan-platform.git"
 }
 
 # ---------------------------------------------------------------------------

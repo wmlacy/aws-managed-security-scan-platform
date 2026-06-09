@@ -26,16 +26,16 @@ A productized AWS-based security scanning service. A single CodeBuild project ta
 
 ## AWS resources in use
 
-All in **region `us-east-1`**, account **`779846785166`**. All managed by Terraform (see `terraform/main.tf`) unless noted.
+All in **region `us-east-1`**, account **`<your-aws-account-id>`**. All managed by Terraform (see `terraform/main.tf`) unless noted.
 
 | Resource | Identifier | Notes |
 |---|---|---|
 | CodeBuild project | `managed-security-scan-platform` | |
 | Service role | `codebuild-managed-security-scan-platform-service-role` | named manually to match prior convention |
 | Inline IAM policy on role | `codebuild-scan-policy` | built from `aws_iam_policy_document` — real values via TF refs, no placeholders |
-| S3 report bucket | `managed-security-scan-reports-will-001` | SSE-S3, public access blocked |
-| SNS topic | `arn:aws:sns:us-east-1:779846785166:scan-notifications` | |
-| SNS email subscription | `wmlacy3000@gmail.com` | confirmed |
+| S3 report bucket | `<your-reports-bucket>` | SSE-S3, public access blocked |
+| SNS topic | `arn:aws:sns:us-east-1:<your-aws-account-id>:scan-notifications` | |
+| SNS email subscription | `you@example.com` | confirmed |
 | Secrets Manager — GitHub PAT | `security-scan/github-token` | real PAT, repo scope. Set via CLI post-apply |
 | Secrets Manager — optional ZAP auth header | `security-scan/target-auth-header` | value `none` (sentinel) |
 | CodeBuild source credential | account+region level, type `PERSONAL_ACCESS_TOKEN` | **NOT** managed by Terraform — imported via CLI |
@@ -143,7 +143,7 @@ aws codebuild start-build --project-name managed-security-scan-platform --region
   --environment-variables-override name=TARGET_REPO,value=owner/repo,type=PLAINTEXT name=CLIENT_NAME,value=client-name,type=PLAINTEXT
 
 # === Inspect ===
-aws s3 ls s3://managed-security-scan-reports-will-001/ --recursive
+aws s3 ls s3://<your-reports-bucket>/ --recursive
 aws codebuild batch-get-builds --ids <build-id> --region us-east-1 --query 'builds[0].[currentPhase,buildStatus]' --output text
 ```
 

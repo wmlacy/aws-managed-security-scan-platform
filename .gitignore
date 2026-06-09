@@ -12,3 +12,7 @@ terraform/terraform.tfstate.backup
 terraform/*.tfvars
 terraform/crash.log
 terraform/crash.*.log
+
+# Python
+__pycache__/
+*.pyc
