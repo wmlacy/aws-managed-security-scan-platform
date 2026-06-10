@@ -2,7 +2,7 @@
 
 A managed, infrastructure-as-code security scanning pipeline. One AWS CodeBuild project runs the right scanners against a **GitHub repo**, a **web URL**, or an **API spec** — uploads structured findings to S3 and emails a human-readable summary.
 
-Built end-to-end as a portfolio piece: AWS architecture, Terraform IaC, Bash, Python, and four open-source security scanners stitched into a single deliverable.
+This project demonstrates an AWS-native approach to security scan orchestration using Terraform, CodeBuild, Secrets Manager, S3, SNS, Bash, Python, and multiple open-source scanners integrated into a single repeatable workflow.
 
 ---
 
@@ -205,7 +205,7 @@ The full annotated list (15 entries with fixes) lives in [`PROJECT_CONTEXT.md`](
 
 ## Why this exists
 
-I built this end-to-end to ground my cloud engineering and security work in something concrete: real AWS resources, real IAM, real Terraform, real scanners producing real findings. Useful as a portfolio piece and as a starting point if you want a low-cost, AWS-native security scanning baseline for one-off audits or per-client scans.
+Security scans often produce fragmented outputs across separate tools, formats, and workflows. This project brings those pieces into one AWS-native pipeline so findings can be collected, stored, summarized, and reviewed consistently.
 
 ---
 
