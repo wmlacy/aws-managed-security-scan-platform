@@ -48,3 +48,8 @@ output "codebuild_project_url" {
   description = "Direct console link to the CodeBuild project."
   value       = "https://console.aws.amazon.com/codesuite/codebuild/projects/${aws_codebuild_project.scan.name}?region=${var.aws_region}"
 }
+
+output "kms_key_arn" {
+  description = "ARN of the CMK encrypting the S3 reports, SNS topic, and secrets."
+  value       = aws_kms_key.scan.arn
+}

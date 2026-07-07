@@ -38,12 +38,83 @@ provider "aws" {
 data "aws_caller_identity" "current" {}
 
 # ---------------------------------------------------------------------------
+# KMS customer-managed key (CMK)
+# ---------------------------------------------------------------------------
+#
+# One CMK encrypts all three data-at-rest stores: the S3 report bucket, the
+# SNS topic, and the Secrets Manager secrets. AWS-managed keys (the default)
+# work, but the platform's own self-scan flags them HIGH/MEDIUM — so a
+# security product should hold itself to the CMK standard it enforces.
+#
+# Key policy design (KMS is deny-by-default; access must be granted HERE or
+# delegated to IAM via the root statement):
+#   1. Root/account keeps full admin — standard, and prevents lockout.
+#   2. The CodeBuild role gets exactly the operations it needs: Decrypt (read
+#      secrets, read SSE-KMS objects), GenerateDataKey (write SSE-KMS objects,
+#      publish to the encrypted topic), DescribeKey.
+#   3. The SNS service principal can use the key so encrypted publishes and
+#      email delivery succeed.
+# Access is granted to the role HERE (not in its IAM policy) on purpose: a
+# mutual key<->role reference would be a Terraform dependency cycle.
+
+data "aws_iam_policy_document" "scan_kms" {
+  statement {
+    sid       = "EnableRootAccountAdmin"
+    effect    = "Allow"
+    actions   = ["kms:*"]
+    resources = ["*"]
+
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+  }
+
+  statement {
+    sid       = "AllowCodeBuildRoleUse"
+    effect    = "Allow"
+    actions   = ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
+    resources = ["*"]
+
+    principals {
+      type        = "AWS"
+      identifiers = [aws_iam_role.codebuild.arn]
+    }
+  }
+
+  statement {
+    sid       = "AllowSNSServiceUse"
+    effect    = "Allow"
+    actions   = ["kms:Decrypt", "kms:GenerateDataKey*"]
+    resources = ["*"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["sns.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_kms_key" "scan" {
+  description             = "CMK for the Managed Security Scan Platform: S3 reports, SNS topic, and Secrets Manager secrets."
+  enable_key_rotation     = true
+  deletion_window_in_days = 30
+  policy                  = data.aws_iam_policy_document.scan_kms.json
+}
+
+resource "aws_kms_alias" "scan" {
+  name          = "alias/${var.project_name}"
+  target_key_id = aws_kms_key.scan.key_id
+}
+
+# ---------------------------------------------------------------------------
 # S3 report bucket
 # ---------------------------------------------------------------------------
 #
-# The bucket holds scan reports. New S3 buckets are SSE-S3 encrypted and
-# block public access by default; we re-assert the public access block
-# explicitly so the intent is in code.
+# The bucket holds scan reports. New S3 buckets block public access by
+# default; we re-assert the public access block explicitly so the intent is
+# in code, and set SSE-KMS with the CMK above. `bucket_key_enabled` cuts KMS
+# API calls (and cost) by using an S3 bucket key.
 
 resource "aws_s3_bucket" "reports" {
   bucket = var.report_bucket_name
@@ -57,6 +128,18 @@ resource "aws_s3_bucket_public_access_block" "reports" {
   restrict_public_buckets = true
 }
 
+resource "aws_s3_bucket_server_side_encryption_configuration" "reports" {
+  bucket = aws_s3_bucket.reports.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.scan.arn
+    }
+    bucket_key_enabled = true
+  }
+}
+
 # ---------------------------------------------------------------------------
 # SNS topic + email subscription
 # ---------------------------------------------------------------------------
@@ -66,7 +149,8 @@ resource "aws_s3_bucket_public_access_block" "reports" {
 # clicked before notifications start arriving.
 
 resource "aws_sns_topic" "notifications" {
-  name = var.sns_topic_name
+  name              = var.sns_topic_name
+  kms_master_key_id = aws_kms_key.scan.id
 }
 
 resource "aws_sns_topic_subscription" "email" {
@@ -91,6 +175,7 @@ resource "aws_sns_topic_subscription" "email" {
 resource "aws_secretsmanager_secret" "github_token" {
   name        = "${var.secrets_prefix}/github-token"
   description = "GitHub PAT (repo scope) for cloning target repos. Real value set via CLI."
+  kms_key_id  = aws_kms_key.scan.arn
 }
 
 resource "aws_secretsmanager_secret_version" "github_token_placeholder" {
@@ -105,6 +190,7 @@ resource "aws_secretsmanager_secret_version" "github_token_placeholder" {
 resource "aws_secretsmanager_secret" "target_auth_header" {
   name        = "${var.secrets_prefix}/target-auth-header"
   description = "Optional ZAP auth header for web/api scans. 'none' or empty = no header."
+  kms_key_id  = aws_kms_key.scan.arn
 }
 
 resource "aws_secretsmanager_secret_version" "target_auth_header_placeholder" {
@@ -204,6 +290,11 @@ resource "aws_codebuild_project" "scan" {
   name         = var.project_name
   description  = "Runs managed security scans (semgrep/trivy/gitleaks for repos, ZAP for web/api) against client targets."
   service_role = aws_iam_role.codebuild.arn
+
+  # Encrypt build output artifacts/logs with the platform CMK instead of the
+  # default AWS-managed S3 key. The service role can use this key via the key
+  # policy (GenerateDataKey/Decrypt).
+  encryption_key = aws_kms_key.scan.arn
 
   source {
     type      = "GITHUB"
