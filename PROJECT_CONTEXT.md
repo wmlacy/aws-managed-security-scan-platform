@@ -18,6 +18,9 @@ A productized AWS-based security scanning service. A single CodeBuild project ta
 ## Current status
 
 - **Pipeline is live and works end-to-end on a fully Terraform-managed stack.** All AWS resources (S3, SNS, secrets, IAM role + policy, CodeBuild project) were torn down and recreated from `terraform/{main,variables,outputs}.tf`. End-to-end verified 2026-06-06: a self-test scan against the pipeline repo itself completed all phases, dropped 5 report files in S3, and fired the SNS email.
+- **First external target validated 2026-07-07.** Scanned `OWASP/NodeGoat` (client label `demo-nodegoat`, build `f3a62424...`, scan ID `20260707T054749Z-d204f695`). All phases SUCCEEDED; 6 reports in S3; SNS email confirmed received. Surfaced 183 findings (10 CRITICAL / 50 HIGH / 44 MEDIUM / 12 LOW; gitleaks 3, semgrep 35, trivy 78). Confirms detection depth on an unfamiliar codebase, token scrub holding, and the rc=1-but-build-SUCCEEDED path (scan-found-issues vs. pipeline-broke) working as designed.
+- **Repo mode further validated 2026-07-07** on `wmlacy/serverless-platform-template-aws` (13 findings; HIGH = `curl | bash` in a GitHub Actions workflow; MEDIUMs = IaC resources on AWS-managed keys — same theme as our own pending KMS hardening).
+- **Web mode fixed and validated 2026-07-07.** First web scan (`OWASP Juice Shop`) was a **false clean**: ZAP ran but hit `Permission denied` on `/zap/wrk` (container user uid 1000 vs. root-owned bind-mounted `REPORT_DIR`), so no report was written or uploaded despite a green build. Fixed in `scan.sh` (commit `1b2e144`): `chmod 777 "${REPORT_DIR}"` before the `docker run`, plus `-j` AJAX spider so JS/SPA apps get crawled. Re-run confirmed `zap.json`/`zap.html`/`zap.yaml` now land in S3 with 19 findings (4 MEDIUM/10 LOW/5 INFO). NOTE: `zap-baseline.py` is **passive** — it reports headers/config issues, not injected-payload vulns (SQLi/XSS). Active scanning (`zap-full-scan.py`, own-instance only) is a separate future decision.
 - **Files built: 8 of 8** from the manifest, plus the IAM policy.
 - **Source credentials in place** as PAT (re-imported after destroy — the pre-existing OAuth credential didn't auto-pickup on the new TF-built project).
 - Secrets contain real values (set post-apply via `put-secret-value`). Both secrets have `lifecycle.ignore_changes = [secret_string]` in Terraform so future applies don't reset them.
@@ -153,9 +156,10 @@ aws codebuild batch-get-builds --ids <build-id> --region us-east-1 --query 'buil
 
 In order of priority:
 
-1. **`tools/zap-baseline.conf`** — ZAP tuning for web/api scans. Only matters once web/api scans are run in earnest.
-2. **`README.md`** — project documentation.
-3. **(Optional hardening)** Move the TF stack to KMS CMKs for S3, SNS, and Secrets Manager. The self-scan flagged these as HIGH/MEDIUM — the current "plain setup" choice (decisions A/D) was deliberate but is the obvious next maturity bump.
+1. **KMS CMK hardening** — move the TF stack to customer-managed keys for S3, SNS, and Secrets Manager. The self-scan flagged these as HIGH/MEDIUM — the current "plain setup" choice (decisions A/D) was deliberate but is the obvious next maturity bump before selling a security product.
+2. **`tools/zap-baseline.conf`** — ZAP tuning for web/api scans. Only matters once web/api scans are run in earnest.
+
+Done: external target validation (2026-07-07, NodeGoat — see Current status) and `README.md`.
 
 ---
 
