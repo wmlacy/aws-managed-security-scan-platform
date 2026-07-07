@@ -191,6 +191,18 @@ Recommended next actions:
 
 ---
 
+## Validation
+
+The platform has been exercised end-to-end against real targets — not merely confirmed to provision:
+
+- **Pipeline validation (repo mode)** — the pipeline was run against its own repository, confirming the complete flow: clone → scan → structured upload to S3 → SNS email summary.
+- **Detection depth (repo mode)** — [OWASP NodeGoat](https://github.com/OWASP/NodeGoat), a deliberately vulnerable Node.js application, was scanned to confirm the SAST/SCA scanners surface *known* vulnerabilities in unfamiliar code. The run reported multiple critical CVEs (e.g. prototype-pollution and deserialization issues) rather than a false-clean result.
+- **Web scanning path (web mode)** — [OWASP Juice Shop](https://owasp.org/www-project-juice-shop/), an intentionally vulnerable web application, was scanned to verify the ZAP web-scan path, single-page-app crawling, and report generation end to end. This exercise also caught and closed a real defect in which container-side report files were not being captured — the kind of false-clean a security tool must never produce.
+
+Taken together, these confirm the platform detects known security issues under realistic conditions, which is the behavior a reviewer or client actually needs to trust — beyond a successful build.
+
+---
+
 ## Gotchas worth filing (lessons from building this)
 
 The full annotated list (15 entries with fixes) lives in [`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md). A few highlights:
