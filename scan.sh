@@ -32,11 +32,17 @@ case "${TARGET_TYPE}" in
     gitleaks detect --source target-src --report-format json --report-path "${REPORT_DIR}/gitleaks.json" || SCAN_RC=$?
     ;;
   web)
+    # ZAP runs as uid 1000; the bind-mounted REPORT_DIR is root-owned, so
+    # the container can't write its reports without this. -j adds the AJAX
+    # spider, required to crawl JS/SPA apps the traditional spider misses.
+    chmod 777 "${REPORT_DIR}"
     docker run --rm -v "$(pwd)/${REPORT_DIR}:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable \
-      zap-baseline.py -t "${TARGET_URL}" -J zap.json -r zap.html \
+      zap-baseline.py -t "${TARGET_URL}" -j -J zap.json -r zap.html \
       "${ZAP_AUTH[@]}" || SCAN_RC=$?
     ;;
   api)
+    # See web branch: REPORT_DIR must be writable by the ZAP container user.
+    chmod 777 "${REPORT_DIR}"
     docker run --rm -v "$(pwd)/${REPORT_DIR}:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable \
       zap-api-scan.py -t "${OPENAPI_SPEC}" -f openapi -J zap.json -r zap.html \
       "${ZAP_AUTH[@]}" || SCAN_RC=$?
