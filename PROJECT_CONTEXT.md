@@ -18,7 +18,7 @@ A productized AWS-based security scanning service. A single CodeBuild project ta
 ## Current status
 
 - **Pipeline is live and works end-to-end on a fully Terraform-managed stack.** All AWS resources (S3, SNS, secrets, IAM role + policy, CodeBuild project) were torn down and recreated from `terraform/{main,variables,outputs}.tf`. End-to-end verified 2026-06-06: a self-test scan against the pipeline repo itself completed all phases, dropped 5 report files in S3, and fired the SNS email.
-- **Files built: 7 of 8** from the manifest, plus the IAM policy.
+- **Files built: 8 of 8** from the manifest, plus the IAM policy.
 - **Source credentials in place** as PAT (re-imported after destroy — the pre-existing OAuth credential didn't auto-pickup on the new TF-built project).
 - Secrets contain real values (set post-apply via `put-secret-value`). Both secrets have `lifecycle.ignore_changes = [secret_string]` in Terraform so future applies don't reset them.
 
@@ -54,7 +54,7 @@ All in **region `us-east-1`**, account **`<your-aws-account-id>`**. All managed 
 
 | File | Status | Notes |
 |---|---|---|
-| `README.md` | To do | not started |
+| `README.md` | **Built** | project documentation |
 | `buildspec.yml` | **Built** | hardened; calls `./scan.sh`; uses `env.shell: bash` |
 | `scan.sh` | **Built** | scanner case + ZAP_AUTH array + writes `scan_status.txt`; exits with SCAN_RC |
 | `report_summary.py` | **Built** | parses semgrep/trivy/gitleaks/zap output into structured `summary.json` + human-readable `summary.txt`; SNS body now reads `summary.txt` via `file://` |
