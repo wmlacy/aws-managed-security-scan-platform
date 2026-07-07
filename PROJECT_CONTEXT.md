@@ -159,6 +159,6 @@ In order of priority:
 
 ---
 
-## Open question (carried over)
+## Relationship to other projects
 
-Relationship to the **ASERION Engine** project (also AWS security/compliance scanning, for Thai regulatory pilots) is unconfirmed. Treat this as a separate, productized scanning pipeline unless explicitly linked.
+This is a standalone, productized scanning pipeline. It is **not** linked to the **ASERION Engine** project (also AWS security/compliance scanning, for Thai regulatory pilots) — confirmed separate on 2026-07-07. The two share a domain but no code, infrastructure, or roadmap.
