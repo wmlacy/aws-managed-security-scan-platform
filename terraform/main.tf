@@ -140,6 +140,125 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "reports" {
   }
 }
 
+# Versioning keeps prior object versions, so an overwritten or deleted report
+# can be recovered. Reports are keyed by scan ID and are rarely overwritten,
+# so noncurrent versions should stay small.
+resource "aws_s3_bucket_versioning" "reports" {
+  bucket = aws_s3_bucket.reports.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# Server access logging records every request against the report bucket
+# (who read or wrote which report, and when) into the access-log bucket below.
+resource "aws_s3_bucket_logging" "reports" {
+  bucket        = aws_s3_bucket.reports.id
+  target_bucket = aws_s3_bucket.access_logs.id
+  target_prefix = "reports/"
+}
+
+# ---------------------------------------------------------------------------
+# S3 access-log bucket
+# ---------------------------------------------------------------------------
+#
+# Destination for the report bucket's server access logs. Two deliberate
+# exceptions to the stack's standards, suppressed inline for the self-scan:
+#   - AWS-0132 (CMK encryption): S3 server access logging does not support
+#     SSE-KMS destination buckets, so this bucket uses SSE-S3 (AES256).
+#   - AWS-0089 (access logging): logging the log bucket would only produce
+#     logs about log delivery; it is the end of the chain.
+# Delivery is authorized by a bucket policy for the S3 logging service
+# principal, scoped to this account and the report bucket. Logs expire after
+# 90 days to keep storage bounded.
+
+#trivy:ignore:AWS-0132
+#trivy:ignore:AWS-0089
+resource "aws_s3_bucket" "access_logs" {
+  bucket = "${var.report_bucket_name}-access-logs"
+}
+
+resource "aws_s3_bucket_public_access_block" "access_logs" {
+  bucket                  = aws_s3_bucket.access_logs.id
+  block_public_acls       = true
+  ignore_public_acls      = true
+  block_public_policy     = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_versioning" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
+
+  rule {
+    id     = "expire-access-logs"
+    status = "Enabled"
+
+    filter {}
+
+    expiration {
+      days = 90
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+
+  depends_on = [aws_s3_bucket_versioning.access_logs]
+}
+
+data "aws_iam_policy_document" "access_logs" {
+  statement {
+    sid       = "AllowS3ServerAccessLogDelivery"
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.access_logs.arn}/*"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["logging.s3.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values   = [aws_s3_bucket.reports.arn]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
+  policy = data.aws_iam_policy_document.access_logs.json
+
+  depends_on = [aws_s3_bucket_public_access_block.access_logs]
+}
+
 # ---------------------------------------------------------------------------
 # SNS topic + email subscription
 # ---------------------------------------------------------------------------

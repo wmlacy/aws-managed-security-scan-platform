@@ -1,17 +1,15 @@
 # Managed Security Scan Platform — Project Context
 
-> Handoff / recovery document. Captures everything not derivable from the code itself: AWS resource identities, design decisions, gotchas hit, and what's pending.
-> Last updated: 2026-06-06
+> Engineering notes for this pipeline: the design decisions behind the buildspec/scan.sh split,
+> the AWS resource model, and the non-obvious CodeBuild behaviours encountered while building it.
+> Covers what is not derivable from the code itself.
+> Last updated: 2026-09-22
 
 ---
 
 ## What this is
 
 A productized AWS-based security scanning service. A single CodeBuild project takes a target (a GitHub repo, a web URL, or an OpenAPI spec) and runs the appropriate scanners, uploads reports to S3, and sends an SNS notification. Scan logic lives in **this** pipeline repo; the client target is pulled in during `pre_build` as data — never used as the CodeBuild source. That separation is load-bearing for the product: scan tooling never touches the client's codebase.
-
-- **Repo:** https://github.com/wmlacy/aws-managed-security-scan-platform (private)
-- **Local working dir:** `/Users/willl/Desktop/Security Scans/`
-- **Visibility:** internal tool; not seen externally.
 
 ---
 
@@ -22,7 +20,6 @@ A productized AWS-based security scanning service. A single CodeBuild project ta
 - **Repo mode further validated 2026-07-07** on `wmlacy/serverless-platform-template-aws` (13 findings; HIGH = `curl | bash` in a GitHub Actions workflow; MEDIUMs = IaC resources on AWS-managed keys — same theme as our own pending KMS hardening).
 - **Web mode fixed and validated 2026-07-07.** First web scan (`OWASP Juice Shop`) was a **false clean**: ZAP ran but hit `Permission denied` on `/zap/wrk` (container user uid 1000 vs. root-owned bind-mounted `REPORT_DIR`), so no report was written or uploaded despite a green build. Fixed in `scan.sh` (commit `1b2e144`): `chmod 777 "${REPORT_DIR}"` before the `docker run`, plus `-j` AJAX spider so JS/SPA apps get crawled. Re-run confirmed `zap.json`/`zap.html`/`zap.yaml` now land in S3 with 19 findings (4 MEDIUM/10 LOW/5 INFO). NOTE: `zap-baseline.py` is **passive** — it reports headers/config issues, not injected-payload vulns (SQLi/XSS). Active scanning (`zap-full-scan.py`, own-instance only) is a separate future decision.
 - **KMS CMK hardening done and verified 2026-07-07** (commit `646df40`). One customer-managed key (`alias/managed-security-scan-platform`, rotation on) now encrypts the S3 report bucket (SSE-KMS + bucket key), the SNS topic, both Secrets Manager secrets, and the CodeBuild project. Key policy grants the CodeBuild role Decrypt/GenerateDataKey/DescribeKey and lets the SNS service use the key; role KMS access lives in the *key policy*, not the role's IAM policy, to avoid a Terraform dependency cycle. Verified two ways by a self-scan (scan ID `20260707T075343Z-79d29769`): (a) build SUCCEEDED, so the role still decrypts secrets, writes SSE-KMS objects, and publishes to the encrypted topic — hardening did not break the pipeline; (b) all four encryption findings (2 HIGH: SNS + S3; 2 MEDIUM categories: Secrets + CodeBuild) dropped out of the report. Real values (bucket name, email, repo URL) live in local gitignored `terraform/terraform.tfvars`, recreated 2026-07-07 after the public-release sanitization had left `variables.tf` with placeholders and no tfvars — without it, `plan` wanted to destroy/replace the bucket and email subscription.
-- **Files built: 8 of 8** from the manifest, plus the IAM policy.
 - **Source credentials in place** as PAT (re-imported after destroy — the pre-existing OAuth credential didn't auto-pickup on the new TF-built project).
 - Secrets contain real values (set post-apply via `put-secret-value`). Both secrets have `lifecycle.ignore_changes = [secret_string]` in Terraform so future applies don't reset them.
 
@@ -54,19 +51,19 @@ All in **region `us-east-1`**, account **`<your-aws-account-id>`**. All managed 
 
 ---
 
-## File status (manifest)
+## Components
 
-| File | Status | Notes |
-|---|---|---|
-| `README.md` | **Built** | project documentation |
-| `buildspec.yml` | **Built** | hardened; calls `./scan.sh`; uses `env.shell: bash` |
-| `scan.sh` | **Built** | scanner case + ZAP_AUTH array + writes `scan_status.txt`; exits with SCAN_RC |
-| `report_summary.py` | **Built** | parses semgrep/trivy/gitleaks/zap output into structured `summary.json` + human-readable `summary.txt`; SNS body now reads `summary.txt` via `file://` |
-| `tools/zap-baseline.conf` | To do | only matters once web/api scans run |
-| `terraform/main.tf` | **Built** | 11 resources + 3 data blocks; proven by end-to-end run |
-| `terraform/variables.tf` | **Built** | 11 inputs with defaults matching live account |
-| `terraform/outputs.tf` | **Built** | 8 outputs surfacing ARNs and the console URL |
-| `codebuild-scan-policy.json` (footnote) | **Superseded** | template kept as reference; real policy now lives in `main.tf` as `aws_iam_policy_document.codebuild_permissions` |
+| File | Role |
+|---|---|
+| `README.md` | Project documentation |
+| `buildspec.yml` | Workspace prep and post-processing; calls `./scan.sh`; sets `env.shell: bash` |
+| `scan.sh` | Scanner execution; `ZAP_AUTH` array; writes `scan_status.txt`; exits with `SCAN_RC` |
+| `report_summary.py` | Parses semgrep/trivy/gitleaks/zap output into `summary.json` plus human-readable `summary.txt`; the SNS body reads `summary.txt` via `file://` |
+| `tools/zap-baseline.conf` | ZAP tuning for web and API scans (not yet present; see Open items) |
+| `terraform/main.tf` | 11 resources and 3 data blocks; verified by end-to-end run |
+| `terraform/variables.tf` | 11 inputs; real values supplied via a gitignored `terraform.tfvars` |
+| `terraform/outputs.tf` | 8 outputs surfacing ARNs and the console URL |
+| `codebuild-scan-policy.json` | Superseded reference template; the live policy is `aws_iam_policy_document.codebuild_permissions` in `main.tf` |
 
 ---
 
@@ -116,7 +113,7 @@ Non-obvious things that broke first runs. Worth keeping for future AWS work.
 
 ```bash
 # === Apply / change infrastructure ===
-cd "/Users/willl/Desktop/Security Scans/terraform"
+cd <repo>/terraform
 terraform plan                  # preview changes
 terraform apply                 # apply (asks for "yes")
 terraform output                # see all output values
@@ -153,17 +150,11 @@ aws codebuild batch-get-builds --ids <build-id> --region us-east-1 --query 'buil
 
 ---
 
-## Pending / next steps
+## Open items
 
 In order of priority:
 
-1. **Residual S3 self-scan findings (deferred — Will to return to these).** The post-KMS self-scan (`20260707T075343Z-79d29769`) still shows two non-encryption findings on the report bucket: `AWS-0090` S3 versioning not enabled (MEDIUM) and `AWS-0089` S3 access logging not enabled (LOW). Both are small Terraform additions (`aws_s3_bucket_versioning` + a logging config with a target bucket). Data-durability/audit items, not confidentiality. Clearing them makes the stack self-scan fully clean.
+1. **Residual S3 self-scan findings (deferred).** The post-KMS self-scan (`20260707T075343Z-79d29769`) still shows two non-encryption findings on the report bucket: `AWS-0090` S3 versioning not enabled (MEDIUM) and `AWS-0089` S3 access logging not enabled (LOW). Both are small Terraform additions (`aws_s3_bucket_versioning` + a logging config with a target bucket). Data-durability/audit items, not confidentiality. Clearing them makes the stack self-scan fully clean.
 2. **`tools/zap-baseline.conf`** — ZAP tuning for web/api scans. Only matters once web/api scans are run in earnest.
 
 Done: KMS CMK hardening (2026-07-07, verified), external target validation (2026-07-07, NodeGoat + Juice Shop + serverless-template — see Current status), and `README.md`.
-
----
-
-## Relationship to other projects
-
-This is a standalone, productized scanning pipeline. It is **not** linked to the **ASERION Engine** project (also AWS security/compliance scanning, for Thai regulatory pilots) — confirmed separate on 2026-07-07. The two share a domain but no code, infrastructure, or roadmap.

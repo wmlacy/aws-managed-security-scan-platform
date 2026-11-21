@@ -19,6 +19,11 @@ output "report_bucket_arn" {
   value       = aws_s3_bucket.reports.arn
 }
 
+output "access_log_bucket_name" {
+  description = "S3 bucket receiving the report bucket's server access logs."
+  value       = aws_s3_bucket.access_logs.id
+}
+
 output "sns_topic_arn" {
   description = "Topic ARN the buildspec publishes to. Set this as SNS_TOPIC_ARN in CodeBuild env if you ever rewire by hand."
   value       = aws_sns_topic.notifications.arn
