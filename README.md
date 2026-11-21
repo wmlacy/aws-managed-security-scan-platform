@@ -63,7 +63,7 @@ Each run produces five report files in S3 and a single email summary with:
 
 ## Stack
 
-- **AWS**: CodeBuild, S3, SNS, Secrets Manager, IAM
+- **AWS**: CodeBuild, S3, SNS, Secrets Manager, IAM, KMS
 - **Terraform** 1.5+ with the AWS provider 5.x
 - **Python 3.12**, **Bash**
 - Scanners: [semgrep](https://semgrep.dev/), [trivy](https://trivy.dev/), [gitleaks](https://github.com/gitleaks/gitleaks), [OWASP ZAP](https://www.zaproxy.org/)
@@ -88,7 +88,7 @@ cd aws-managed-security-scan-platform/terraform
 
 # 2. Build the infrastructure
 terraform init
-terraform plan        # preview ~11 AWS resources
+terraform plan        # preview ~22 AWS resources
 terraform apply       # confirm with "yes"
 
 # 3. Drop the real GitHub PAT into the placeholder secret
@@ -130,9 +130,9 @@ Within ~3 minutes you'll have findings in S3 and an email summary.
 ├── report_summary.py           parses raw scanner JSON into summary.json + summary.txt
 ├── codebuild-scan-policy.json  legacy template (kept as reference; superseded by Terraform)
 └── terraform/
-    ├── main.tf                 11 resources: S3, SNS, secrets, IAM, CodeBuild
+    ├── main.tf                 22 resources: KMS, S3 (reports + access logs), SNS, secrets, IAM, CodeBuild
     ├── variables.tf            11 inputs with sensible defaults
-    └── outputs.tf              8 outputs (ARNs + console URL)
+    └── outputs.tf              10 outputs (ARNs, bucket names, console URL)
 ```
 
 ---
@@ -152,6 +152,10 @@ A few non-obvious choices that shape the architecture:
 **5. S3 upload happens *before* SNS publish.** If the upload fails, the build aborts before the notification fires — so no "scan complete" email is ever sent without a corresponding report in S3.
 
 **6. `report_summary.py` is defensive.** If parsing fails for any reason, the script still writes a minimal `summary.txt` so the downstream `sns publish --message file://...` doesn't cascade-fail.
+
+**7. One customer-managed KMS key encrypts every data store.** The report bucket (SSE-KMS with a bucket key), the SNS topic, both secrets, and the CodeBuild project share a single rotating CMK. The CodeBuild role's KMS permissions live in the key policy rather than its IAM policy, which avoids a Terraform dependency cycle between the key and the role.
+
+**8. The report bucket is versioned and access-logged; the log bucket is the end of the chain.** Server access logs go to a dedicated bucket with versioning, public access blocked, and 90-day expiry. That bucket uses SSE-S3 because S3 server access logging cannot deliver to an SSE-KMS bucket, and it is not itself logged. Both exceptions are suppressed inline (`#trivy:ignore:AWS-0132`, `#trivy:ignore:AWS-0089`) with the justification next to the resource, so the platform's self-scan reports zero findings without hiding anything undocumented.
 
 ---
 
