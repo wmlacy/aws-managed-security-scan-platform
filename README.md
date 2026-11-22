@@ -30,14 +30,16 @@ This project demonstrates an AWS-native approach to security scan orchestration 
    └──────────────┘         └─────────────┘
 ```
 
-Per-scan layout in S3:
+Per-scan layout in S3 (six files per run):
 ```
 s3://<reports-bucket>/<client-name>/<scan-id>/
-  ├── semgrep.json     (SAST findings)
-  ├── trivy.json       (SCA / vuln / secret / misconfig)
-  ├── gitleaks.json    (committed secrets)
-  ├── zap.json         (web/api DAST, when run)
-  ├── summary.json     (structured aggregate)
+  ├── semgrep.json     (repo: SAST findings)
+  ├── trivy.json       (repo: SCA / vuln / secret / misconfig)
+  ├── gitleaks.json    (repo: committed secrets)
+  ├── zap.json         (web/api: DAST findings, unfiltered)
+  ├── zap.html         (web/api: ZAP HTML report)
+  ├── zap.yaml         (web/api: ZAP automation plan used for the run)
+  ├── summary.json     (structured aggregate, status, suppressed findings)
   ├── summary.txt      (human-readable, same content as the SNS email)
   └── scan_status.txt  (final exit code)
 ```
@@ -52,10 +54,12 @@ s3://<reports-bucket>/<client-name>/<scan-id>/
 | `web`          | Web URL                 | OWASP ZAP baseline scan              |
 | `api`          | OpenAPI spec            | OWASP ZAP API scan                   |
 
-Each run produces five report files in S3 and a single email summary with:
+Each run produces six files in S3 (three scanner reports plus `summary.json`, `summary.txt`, and `scan_status.txt`) and a single email summary with:
 
+- A status: **CLEAN**, **FINDINGS**, **INCOMPLETE** (a scanner report is missing or invalid), or **FAILED** (a scanner or the summary step errored)
 - Total findings, broken down by tool **and** by severity
 - Top 5 findings with file/line context
+- For web/api scans, every alert suppressed by `tools/zap-baseline.conf`, with the recorded reason
 - Recommended next actions (rotate secrets, address criticals, etc.)
 - A pointer to the full reports in S3
 
@@ -129,6 +133,10 @@ Within ~3 minutes you'll have findings in S3 and an email summary.
 ├── scan.sh                     scanner execution: TARGET_TYPE case + semgrep/trivy/gitleaks/ZAP
 ├── report_summary.py           parses raw scanner JSON into summary.json + summary.txt
 ├── codebuild-scan-policy.json  legacy template (kept as reference; superseded by Terraform)
+├── tools/
+│   └── zap-baseline.conf       ZAP rule policy: FAIL / WARN / IGNORE per rule, with a reason for every IGNORE
+├── tests/
+│   └── test_report_summary.py  status and suppression tests (python3 -m unittest discover tests)
 └── terraform/
     ├── main.tf                 22 resources: KMS, S3 (reports + access logs), SNS, secrets, IAM, CodeBuild
     ├── variables.tf            11 inputs with sensible defaults
@@ -156,6 +164,10 @@ A few non-obvious choices that shape the architecture:
 **7. One customer-managed KMS key encrypts every data store.** The report bucket (SSE-KMS with a bucket key), the SNS topic, both secrets, and the CodeBuild project share a single rotating CMK. The CodeBuild role's KMS permissions live in the key policy rather than its IAM policy, which avoids a Terraform dependency cycle between the key and the role.
 
 **8. The report bucket is versioned and access-logged; the log bucket is the end of the chain.** Server access logs go to a dedicated bucket with versioning, public access blocked, and 90-day expiry. That bucket uses SSE-S3 because S3 server access logging cannot deliver to an SSE-KMS bucket, and it is not itself logged. Both exceptions are suppressed inline (`#trivy:ignore:AWS-0132`, `#trivy:ignore:AWS-0089`) with the justification next to the resource, so the platform's self-scan reports zero findings without hiding anything undocumented.
+
+**9. Status is fail-closed.** A scan is reported CLEAN only when every report expected for the target type exists and has the expected structure, the scanners exited 0, and no unsuppressed findings remain. A missing, empty, or malformed report yields INCOMPLETE; a non-zero exit with no findings, or a failure of the summary step itself, yields FAILED. The SNS subject is derived from the same status and falls back to "status unknown", never "clean". This closes the false-clean path found during web-mode validation, where ZAP wrote no report yet the build succeeded.
+
+**10. Suppression is traceable.** ZAP alerts are suppressed only by an IGNORE rule in `tools/zap-baseline.conf` that records a reason. Suppressed alerts are excluded from the counts but listed with that reason in the summary, and the raw `zap.json` is uploaded unmodified. HIGH-risk alerts are never suppressed, and an IGNORE rule without a reason has no effect.
 
 ---
 

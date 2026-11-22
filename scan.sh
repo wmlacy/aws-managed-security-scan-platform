@@ -8,6 +8,10 @@
 #   OPENAPI_SPEC        (api) OpenAPI spec URL/path
 #   REPORT_DIR          where scanner reports are written
 #
+# web/api scans apply tools/zap-baseline.conf (FAIL / WARN / IGNORE per rule).
+# The tools/ directory is mounted read-only into the ZAP container, so the
+# policy never lands in REPORT_DIR or the uploaded reports.
+#
 # For repo scans, expects target-src/ to already exist in the working
 # directory (cloned by buildspec.yml pre_build).
 #
@@ -36,16 +40,18 @@ case "${TARGET_TYPE}" in
     # the container can't write its reports without this. -j adds the AJAX
     # spider, required to crawl JS/SPA apps the traditional spider misses.
     chmod 777 "${REPORT_DIR}"
-    docker run --rm -v "$(pwd)/${REPORT_DIR}:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable \
+    docker run --rm -v "$(pwd)/${REPORT_DIR}:/zap/wrk:rw" -v "$(pwd)/tools:/zap/policy:ro" \
+      ghcr.io/zaproxy/zaproxy:stable \
       zap-baseline.py -t "${TARGET_URL}" -j -J zap.json -r zap.html \
-      "${ZAP_AUTH[@]}" || SCAN_RC=$?
+      -c /zap/policy/zap-baseline.conf "${ZAP_AUTH[@]}" || SCAN_RC=$?
     ;;
   api)
     # See web branch: REPORT_DIR must be writable by the ZAP container user.
     chmod 777 "${REPORT_DIR}"
-    docker run --rm -v "$(pwd)/${REPORT_DIR}:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable \
+    docker run --rm -v "$(pwd)/${REPORT_DIR}:/zap/wrk:rw" -v "$(pwd)/tools:/zap/policy:ro" \
+      ghcr.io/zaproxy/zaproxy:stable \
       zap-api-scan.py -t "${OPENAPI_SPEC}" -f openapi -J zap.json -r zap.html \
-      "${ZAP_AUTH[@]}" || SCAN_RC=$?
+      -c /zap/policy/zap-baseline.conf "${ZAP_AUTH[@]}" || SCAN_RC=$?
     ;;
   *)
     echo "Unknown TARGET_TYPE: ${TARGET_TYPE}" >&2

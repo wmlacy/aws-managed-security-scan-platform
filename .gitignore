@@ -16,3 +16,6 @@ terraform/crash.*.log
 # Python
 __pycache__/
 *.pyc
+
+# SNS subject written by report_summary.py at build time
+.sns_subject

@@ -110,14 +110,15 @@ phases:
       # 2) Push everything to S3 FIRST. If this fails, we never reach SNS,
       #    so a "scan complete" alert can't fire on a missing report.
       - aws s3 cp "${REPORT_DIR}" "s3://${REPORT_BUCKET}/${CLIENT_NAME}/${SCAN_ID}/" --recursive
-      # 3) Build a short SNS subject (must be ASCII and < 100 chars).
+      # 3) SNS subject comes from the status report_summary.py decided (fail-closed:
+      #    "clean" only when every report is present and valid, scanners exited 0,
+      #    and no unsuppressed findings remain). If the subject file is missing,
+      #    fall back to "status unknown" - never to "clean".
       - |
-        if [ "${SCAN_RC:-1}" -eq 0 ]; then
-          SUBJECT_STATUS="clean"
-        else
-          SUBJECT_STATUS="findings (rc=${SCAN_RC})"
+        SUBJECT="$(head -c 99 .sns_subject 2>/dev/null)"
+        if [ -z "${SUBJECT}" ]; then
+          SUBJECT="$(printf '%.99s' "Scan ${CLIENT_NAME}: status unknown")"
         fi
-        SUBJECT="$(printf '%.99s' "Scan ${CLIENT_NAME}: ${SUBJECT_STATUS}")"
       # 4) Publish to SNS with summary.txt as the message body. Using file://
       #    instead of $(cat ...) avoids the shell expanding any $(...) or
       #    backticks that might appear in a finding's message text.

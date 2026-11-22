@@ -1,23 +1,39 @@
 #!/usr/bin/env python3
 """
 report_summary.py - Build human-readable + structured summaries from raw
-scanner output.
+scanner output, and decide the scan's overall status.
 
 Reads (from REPORT_DIR):
   semgrep.json    (repo scans)
   trivy.json      (repo scans)
   gitleaks.json   (repo scans)
-  zap.json        (web/api scans - basic support)
+  zap.json        (web/api scans)
+
+Reads (from this repo):
+  tools/zap-baseline.conf   ZAP rule policy (override path with ZAP_POLICY)
 
 Reads from environment (set by buildspec/scan.sh):
   REPORT_DIR, SCAN_ID, CLIENT_NAME, TARGET_TYPE, TARGET_DESC, SCAN_RC, REPORT_BUCKET
 
-Writes (into REPORT_DIR):
+Writes (into REPORT_DIR, uploaded to S3):
   summary.json    - structured, machine-readable
   summary.txt     - human-readable, used as the SNS message body
+Writes (into the working directory, not uploaded; override with SUBJECT_FILE):
+  .sns_subject    - SNS subject line derived from the status
 
-Always exits 0. On internal error, a minimal summary.txt is still written
-so the downstream SNS publish has something to send.
+Status is fail-closed. CLEAN is reported only when every report expected for
+the target type exists and has the expected structure, the scanners exited 0,
+and no unsuppressed findings remain. Otherwise the status is FINDINGS,
+INCOMPLETE (a report is missing or invalid), or FAILED (a scanner errored, the
+exit code is unavailable, or this script itself failed).
+
+Suppression is traceable. A ZAP alert is suppressed only when the policy marks
+its rule IGNORE *and* records a reason. Suppressed alerts are excluded from the
+counts but listed with their reason in both summaries, and the raw zap.json is
+uploaded unmodified. HIGH-risk alerts are never suppressed.
+
+Always exits 0. On internal error, a minimal summary is still written with
+status FAILED so the downstream SNS publish never reports a clean result.
 """
 
 import json
@@ -43,6 +59,19 @@ SCAN_RC       = env("SCAN_RC", "unknown")
 REPORT_BUCKET = env("REPORT_BUCKET", "")
 
 REPORT_PATH = Path(REPORT_DIR)
+SUBJECT_PATH = Path(env("SUBJECT_FILE", ".sns_subject"))
+ZAP_POLICY_PATH = Path(env(
+    "ZAP_POLICY",
+    str(Path(__file__).resolve().parent / "tools" / "zap-baseline.conf"),
+))
+
+# Reports each target type must produce. A missing or malformed report means
+# the scan did not run to completion, so the result can never be CLEAN.
+EXPECTED_REPORTS = {
+    "repo": ["semgrep.json", "trivy.json", "gitleaks.json"],
+    "web": ["zap.json"],
+    "api": ["zap.json"],
+}
 S3_LOCATION = (
     f"s3://{REPORT_BUCKET}/{CLIENT_NAME}/{SCAN_ID}/"
     if REPORT_BUCKET
@@ -159,38 +188,166 @@ def parse_gitleaks():
     return out
 
 
-def parse_zap():
+def load_zap_policy():
+    """Return ({rule_id: {"action", "reason"}}, policy_found) from the ZAP config.
+
+    Line format (tab separated): <rule id> <ACTION> (<rule name>) <reason>
+    """
+    policy = {}
+    if not ZAP_POLICY_PATH.is_file():
+        return policy, False
+    for line in ZAP_POLICY_PATH.read_text().splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts = line.rstrip().split("\t")
+        if len(parts) < 3:
+            continue
+        policy[parts[0].strip()] = {
+            "action": parts[1].strip().upper(),
+            "reason": parts[3].strip() if len(parts) > 3 else "",
+        }
+    return policy, True
+
+
+def parse_zap(policy):
+    """Return (active, suppressed) ZAP findings.
+
+    An alert is suppressed only if its rule is IGNORE in the policy, the policy
+    records a reason, and the alert is not HIGH risk. Everything else stays
+    active, with a note when a policy entry was overridden.
+    """
     data = load_json("zap.json")
-    if not data:
-        return []
-    out = []
+    active, suppressed = [], []
+    if not isinstance(data, dict):
+        return active, suppressed
     for site in data.get("site", []) or []:
         for a in site.get("alerts", []) or []:
-            out.append({
+            rule_id = str(a.get("pluginid") or "")
+            try:
+                instances = int(a.get("count") or 0)
+            except (TypeError, ValueError):
+                instances = 0
+            f = {
                 "tool": "zap",
                 "severity": normalize("zap", a.get("riskdesc", "")),
-                "id": a.get("pluginid") or a.get("name", "alert"),
+                "id": rule_id or a.get("name", "alert"),
                 "message": (a.get("name") or "")[:200],
                 "file": site.get("@name", ""),
                 "line": None,
-            })
-    return out
+                "instances": instances,
+            }
+            rule = policy.get(rule_id)
+            if rule and rule["action"] == "IGNORE":
+                if f["severity"] == "HIGH":
+                    f["note"] = "policy IGNORE overridden: HIGH-risk alerts are never suppressed"
+                    active.append(f)
+                elif not rule["reason"]:
+                    f["note"] = "policy IGNORE overridden: no reason recorded in the policy"
+                    active.append(f)
+                else:
+                    f["suppression_reason"] = rule["reason"]
+                    suppressed.append(f)
+            else:
+                active.append(f)
+    return active, suppressed
+
+
+# --------------------------------------------------------------------------
+# Report completeness + status (fail-closed)
+# --------------------------------------------------------------------------
+
+def _has_expected_shape(name, data):
+    if name == "semgrep.json":
+        return isinstance(data, dict) and isinstance(data.get("results"), list)
+    if name == "trivy.json":
+        return isinstance(data, dict) and "SchemaVersion" in data
+    if name == "gitleaks.json":
+        return isinstance(data, list)
+    if name == "zap.json":
+        return isinstance(data, dict) and isinstance(data.get("site"), list) and len(data["site"]) > 0
+    return data is not None
+
+
+def check_reports():
+    """Return a list of problems with the reports expected for TARGET_TYPE."""
+    expected = EXPECTED_REPORTS.get(TARGET_TYPE)
+    if expected is None:
+        return [f"unknown target type '{TARGET_TYPE}'"]
+    problems = []
+    for name in expected:
+        p = REPORT_PATH / name
+        if not p.is_file():
+            problems.append(f"{name} missing")
+            continue
+        if p.stat().st_size == 0:
+            problems.append(f"{name} is empty")
+            continue
+        try:
+            data = json.loads(p.read_text())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            problems.append(f"{name} is not valid JSON")
+            continue
+        if not _has_expected_shape(name, data):
+            if name == "zap.json" and isinstance(data, dict) and data.get("site") == []:
+                problems.append("zap.json lists no sites (target was not reached)")
+            else:
+                problems.append(f"{name} does not have the expected structure")
+    return problems
+
+
+def decide_status(problems, active_findings):
+    """Return (status_code, status_text). CLEAN only if every check passes."""
+    try:
+        rc = int(SCAN_RC)
+    except (TypeError, ValueError):
+        rc = None
+    if problems:
+        return ("INCOMPLETE",
+                "INCOMPLETE - not all scanner reports were produced; do not treat as clean")
+    if rc is None:
+        return "FAILED", f"FAILED - scanner exit code unavailable (rc={SCAN_RC})"
+    if active_findings:
+        return "FINDINGS", f"completed WITH findings (rc={rc})"
+    if rc != 0:
+        return ("FAILED",
+                f"FAILED - a scanner exited rc={rc} but reported no findings; treat as a scanner error")
+    return "CLEAN", "completed cleanly - no unsuppressed findings"
+
+
+def write_subject(status_code):
+    """Write the SNS subject (ASCII, under 100 chars) for buildspec.yml to read."""
+    label = {
+        "CLEAN": "clean",
+        "FINDINGS": f"findings (rc={SCAN_RC})",
+        "INCOMPLETE": "INCOMPLETE - reports missing",
+        "FAILED": "FAILED",
+    }.get(status_code, "status unknown")
+    subject = f"Scan {CLIENT_NAME}: {label}"
+    subject = " ".join(subject.split()).encode("ascii", "replace").decode("ascii")
+    SUBJECT_PATH.write_text(subject[:99])
 
 
 # --------------------------------------------------------------------------
 # Recommended actions
 # --------------------------------------------------------------------------
 
-def build_actions(counts_by_severity, counts_by_tool, findings):
+def build_actions(status_code, counts_by_severity, counts_by_tool, findings, suppressed):
     actions = []
+    if status_code == "INCOMPLETE":
+        actions.append("Re-run the scan. Do not rely on this result until every report is present.")
+    if status_code == "FAILED":
+        actions.append("Check the CodeBuild logs for the scanner error, then re-run the scan.")
     if counts_by_severity.get("CRITICAL", 0):
         actions.append(f"Address {counts_by_severity['CRITICAL']} CRITICAL finding(s) before deploying.")
     if counts_by_severity.get("HIGH", 0):
         actions.append(f"Review {counts_by_severity['HIGH']} HIGH finding(s) for risk acceptance.")
     if counts_by_tool.get("gitleaks", 0):
         actions.append("Rotate any leaked credentials surfaced by gitleaks immediately.")
-    if not findings:
-        actions.append("No findings. Continue normal operations.")
+    if status_code == "CLEAN":
+        actions.append("No unsuppressed findings. Continue normal operations.")
+    if suppressed:
+        actions.append(f"Review the {len(suppressed)} suppressed alert type(s) listed above; "
+                       f"they remain in the raw zap.json.")
     actions.append(f"Full reports in {S3_LOCATION}")
     return actions
 
@@ -200,7 +357,10 @@ def build_actions(counts_by_severity, counts_by_tool, findings):
 # --------------------------------------------------------------------------
 
 def build_summary():
-    findings = parse_semgrep() + parse_trivy() + parse_gitleaks() + parse_zap()
+    policy, policy_found = load_zap_policy()
+    zap_active, suppressed = parse_zap(policy)
+    findings = parse_semgrep() + parse_trivy() + parse_gitleaks() + zap_active
+    problems = check_reports()
 
     counts_by_tool = {}
     counts_by_severity = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
@@ -211,13 +371,10 @@ def build_summary():
     findings.sort(key=lambda f: (-SEVERITY_RANK.get(f["severity"], 0), f["tool"], f["id"]))
     top = findings[:5]
 
-    try:
-        rc = int(SCAN_RC)
-        status_text = "completed cleanly - no blocking findings" if rc == 0 else f"completed WITH findings (rc={rc})"
-    except (ValueError, TypeError):
-        status_text = f"completed (rc={SCAN_RC})"
-
-    actions = build_actions(counts_by_severity, counts_by_tool, findings)
+    status_code, status_text = decide_status(problems, findings)
+    actions = build_actions(status_code, counts_by_severity, counts_by_tool, findings, suppressed)
+    zap_scan = TARGET_TYPE in ("web", "api")
+    policy_label = "tools/zap-baseline.conf" if policy_found else "not found - no alerts suppressed"
 
     summary_data = {
         "scan_id": SCAN_ID,
@@ -225,11 +382,16 @@ def build_summary():
         "target_type": TARGET_TYPE,
         "target": TARGET_DESC,
         "scan_rc": SCAN_RC,
+        "status_code": status_code,
         "status": status_text,
+        "report_problems": problems,
         "counts_by_tool": counts_by_tool,
         "counts_by_severity": counts_by_severity,
         "total_findings": len(findings),
         "top_findings": top,
+        "suppressed_count": len(suppressed),
+        "suppressed_findings": suppressed,
+        "suppression_policy": policy_label if zap_scan else None,
         "report_location": S3_LOCATION,
         "recommended_actions": actions,
     }
@@ -242,9 +404,12 @@ def build_summary():
         f"Target:       {TARGET_DESC} ({TARGET_TYPE})",
         f"Scan ID:      {SCAN_ID}",
         f"Status:       {status_text}",
-        "",
-        "Findings by tool:",
     ]
+    if problems:
+        lines.append("Report check: " + "; ".join(problems))
+    if zap_scan:
+        lines.append(f"ZAP policy:   {policy_label}")
+    lines += ["", "Findings by tool:"]
     if counts_by_tool:
         for tool in sorted(counts_by_tool):
             lines.append(f"  {tool:10} {counts_by_tool[tool]}")
@@ -273,13 +438,24 @@ def build_summary():
                 lines.append(f"     {f['message'][:120]}")
             if loc:
                 lines.append(f"     {loc}")
+            if f.get("note"):
+                lines.append(f"     Note: {f['note']}")
+        lines.append("")
+
+    if suppressed:
+        lines.append(f"Suppressed by policy ({len(suppressed)} alert type(s), not counted above;")
+        lines.append("still present in the raw zap.json):")
+        for f in suppressed:
+            lines.append(f"  - [{f['severity']}] {f['id']} {f['message']} "
+                         f"({f['instances']} instance(s))")
+            lines.append(f"    Reason: {f['suppression_reason']}")
         lines.append("")
 
     lines.append("Recommended next actions:")
     for a in actions:
         lines.append(f"  - {a}")
 
-    return summary_data, "\n".join(lines) + "\n"
+    return summary_data, "\n".join(lines) + "\n", status_code
 
 
 # --------------------------------------------------------------------------
@@ -287,11 +463,18 @@ def build_summary():
 # --------------------------------------------------------------------------
 
 def main():
+    # Remove any stale subject first: if this run fails before writing a new
+    # one, buildspec.yml falls back to "status unknown", never a stale "clean".
+    try:
+        SUBJECT_PATH.unlink()
+    except OSError:
+        pass
     try:
         REPORT_PATH.mkdir(parents=True, exist_ok=True)
-        summary_data, summary_text = build_summary()
+        summary_data, summary_text, status_code = build_summary()
         (REPORT_PATH / "summary.json").write_text(json.dumps(summary_data, indent=2))
         (REPORT_PATH / "summary.txt").write_text(summary_text)
+        write_subject(status_code)
         print(
             f"[report_summary] wrote summary.json and summary.txt "
             f"({summary_data['total_findings']} findings)",
@@ -303,13 +486,18 @@ def main():
         err = f"{type(e).__name__}: {e}"
         print(f"[report_summary] FAILED: {err}", file=sys.stderr)
         try:
+            write_subject("FAILED")
+        except Exception:
+            pass
+        try:
             REPORT_PATH.mkdir(parents=True, exist_ok=True)
             minimal = {
                 "scan_id": SCAN_ID,
                 "client": CLIENT_NAME,
                 "target": TARGET_DESC,
                 "scan_rc": SCAN_RC,
-                "status": "summary generation failed",
+                "status_code": "FAILED",
+                "status": "FAILED - summary generation failed",
                 "error": err,
                 "report_location": S3_LOCATION,
             }
@@ -320,7 +508,7 @@ def main():
                 f"Client:   {CLIENT_NAME}\n"
                 f"Target:   {TARGET_DESC} ({TARGET_TYPE})\n"
                 f"Scan ID:  {SCAN_ID}\n"
-                f"Status:   summary generation failed\n"
+                f"Status:   FAILED - summary generation failed\n"
                 f"Error:    {err}\n"
                 f"\n"
                 f"Raw scan reports are still available in {S3_LOCATION}\n"
