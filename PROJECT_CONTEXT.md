@@ -9,7 +9,7 @@
 
 ## What this is
 
-A productized AWS-based security scanning service. A single CodeBuild project takes a target (a GitHub repo, a web URL, or an OpenAPI spec) and runs the appropriate scanners, uploads reports to S3, and sends an SNS notification. Scan logic lives in **this** pipeline repo; the client target is pulled in during `pre_build` as data — never used as the CodeBuild source. That separation is load-bearing for the product: scan tooling never touches the client's codebase.
+An AWS-based security scanning pipeline. A single CodeBuild project takes a target (a GitHub repo, a web URL, or an OpenAPI spec) and runs the appropriate scanners, uploads reports to S3, and sends an SNS notification. Scan logic lives in **this** pipeline repo; the client target is pulled in during `pre_build` as data — never used as the CodeBuild source. That separation is load-bearing for the design: scan tooling never touches the client's codebase.
 
 ---
 
@@ -36,7 +36,7 @@ All in **region `us-east-1`**, account **`<your-aws-account-id>`**. All managed 
 | CodeBuild project | `managed-security-scan-platform` | |
 | Service role | `codebuild-managed-security-scan-platform-service-role` | named manually to match prior convention |
 | Inline IAM policy on role | `codebuild-scan-policy` | built from `aws_iam_policy_document` — real values via TF refs, no placeholders |
-| S3 report bucket | `<your-reports-bucket>` | SSE-S3, public access blocked |
+| S3 report bucket | `<your-reports-bucket>` | SSE-KMS (platform CMK), versioned, access-logged, public access blocked |
 | SNS topic | `arn:aws:sns:us-east-1:<your-aws-account-id>:scan-notifications` | |
 | SNS email subscription | `you@example.com` | confirmed |
 | Secrets Manager — GitHub PAT | `security-scan/github-token` | real PAT, repo scope. Set via CLI post-apply |

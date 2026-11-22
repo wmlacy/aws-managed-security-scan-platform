@@ -21,8 +21,8 @@ env:
     #      CodePipeline (environmentVariablesOverride) so one project scans
     #      any client. ----
     TARGET_TYPE: "repo"          # repo | web | api
-    TARGET_REPO: ""              # e.g. "acme-corp/storefront"  (for repo)
-    TARGET_URL: ""               # e.g. "https://staging.acme.com" (web/api)
+    TARGET_REPO: ""              # e.g. "example-org/storefront" (for repo)
+    TARGET_URL: ""               # e.g. "https://staging.example.com" (web/api)
     OPENAPI_SPEC: ""             # URL or path to OpenAPI spec   (api only)
     CLIENT_NAME: "unknown-client"
     REPORT_BUCKET: ""            # your S3 bucket name (no s3:// prefix)

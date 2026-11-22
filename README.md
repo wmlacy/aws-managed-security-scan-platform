@@ -76,19 +76,20 @@ All four scanners are open source. The interesting work is *not* the scanners th
 
 ---
 
-## Quick start
+## Deployment
+
+How the stack is deployed and a scan is run, documented for reference (see [License](#license)).
 
 Prerequisites: AWS account + Terraform 1.5+ + AWS CLI v2 + a GitHub PAT with `repo` scope.
 
 ```bash
-# 1. Clone and configure
-git clone https://github.com/<your-fork>/aws-managed-security-scan-platform.git
-cd aws-managed-security-scan-platform/terraform
+# 1. Configure
+cd terraform
 
-# Edit variables.tf or create terraform.tfvars to override defaults:
+# Real values are supplied in a local, gitignored terraform.tfvars:
 #   report_bucket_name (must be globally unique)
 #   notification_email
-#   github_repo_url (after you fork)
+#   github_repo_url (the pipeline repository)
 
 # 2. Build the infrastructure
 terraform init
@@ -176,8 +177,8 @@ A few non-obvious choices that shape the architecture:
 ```
 Security Scan Summary
 =====================
-Client:       acme-corp
-Target:       acme/api-service (repo)
+Client:       demo
+Target:       example-org/api-service (repo)
 Scan ID:      20260606T075152Z-551da3ab
 Status:       completed WITH findings (rc=1)
 
@@ -202,7 +203,7 @@ Top 5 findings:
 
 Recommended next actions:
   - Review 2 HIGH finding(s) for risk acceptance.
-  - Full reports in s3://.../acme-corp/20260606T075152Z-551da3ab/
+  - Full reports in s3://.../demo/20260606T075152Z-551da3ab/
 ```
 
 ---
@@ -239,4 +240,4 @@ Security scans often produce fragmented outputs across separate tools, formats, 
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Copyright (c) 2026 Will Lacy. All rights reserved. Published for viewing and reference only; see [LICENSE](LICENSE).

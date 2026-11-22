@@ -28,7 +28,7 @@ variable "project_name" {
 }
 
 variable "report_bucket_name" {
-  description = "Globally-unique S3 bucket name for scan reports. Lowercase, no underscores, 3-63 chars. CHANGE this when forking — bucket names are global to AWS."
+  description = "Globally-unique S3 bucket name for scan reports. Lowercase, no underscores, 3-63 chars. Bucket names are global to AWS; the real value is set in terraform.tfvars."
   type        = string
   default     = "your-scan-reports-bucket-CHANGEME"
 }
@@ -60,9 +60,9 @@ variable "notification_email" {
 # ---------------------------------------------------------------------------
 
 variable "github_repo_url" {
-  description = "HTTPS URL of the pipeline repo (the one containing buildspec.yml and scan.sh). Point this at your fork so CodeBuild pulls the right code."
+  description = "HTTPS URL of the pipeline repo (the one containing buildspec.yml and scan.sh). The real value is set in terraform.tfvars."
   type        = string
-  default     = "https://github.com/YOUR-FORK/aws-managed-security-scan-platform.git"
+  default     = "https://github.com/OWNER/aws-managed-security-scan-platform.git"
 }
 
 # ---------------------------------------------------------------------------
